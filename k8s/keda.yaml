@@ -1,0 +1,59 @@
+# KEDA autoscaling for the worker Deployment.
+#
+# TriggerAuthentication: KEDA reads the Redis password from the same Secret
+# the worker uses, so the password never appears in the ScaledObject.
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: redis-auth
+  namespace: ingest
+spec:
+  secretTargetRef:
+    - parameter: password
+      name: redis-auth
+      key: password
+---
+# ScaledObject: 0..10 workers.
+#   0 -> 1 : KEDA's operator polls Redis every pollingInterval; when a trigger
+#            becomes active (list length > activationListLength) it scales the
+#            Deployment from 0 to 1 itself.
+#   1 -> N : KEDA creates an HPA; the HPA reads the list lengths through KEDA's
+#            metrics API server and computes replicas = ceil(length / listLength).
+#   N -> 0 : when both triggers are inactive for cooldownPeriod, KEDA sets 0.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker
+  namespace: ingest
+spec:
+  scaleTargetRef:
+    name: worker
+  minReplicaCount: 0
+  maxReplicaCount: 10
+  pollingInterval: 5     # seconds between KEDA checks of Redis
+  cooldownPeriod: 30     # seconds idle before scaling 1 -> 0
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          # HPA default is 300s; shortened so scale-down is visible in the demo.
+          stabilizationWindowSeconds: 30
+  triggers:
+    # Backlog: one worker per 5 queued jobs.
+    - type: redis
+      metadata:
+        address: redis.ingest.svc.cluster.local:6379
+        listName: jobs
+        listLength: "5"
+      authenticationRef:
+        name: redis-auth
+    # In-flight work: keep at least one replica per job being processed,
+    # so KEDA never scales to 0 while a worker is still busy.
+    # (The HPA uses the max of all triggers.)
+    - type: redis
+      metadata:
+        address: redis.ingest.svc.cluster.local:6379
+        listName: processing
+        listLength: "1"
+      authenticationRef:
+        name: redis-auth

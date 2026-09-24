@@ -9,5 +9,5 @@ if ! kubectl -n ingest get secret redis-auth >/dev/null 2>&1; then
   kubectl -n ingest create secret generic redis-auth \
     --from-literal=password="$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')"
 fi
-kubectl apply -f k8s/redis.yaml -f k8s/worker.yaml
+kubectl apply -f k8s/redis.yaml -f k8s/worker.yaml -f k8s/keda.yaml
 kubectl -n ingest rollout status deploy/redis --timeout=120s
