@@ -1,0 +1,62 @@
+# Worker: the bash stub from the case, run in the stock redis:7 image
+# (it already contains bash + redis-cli, so no image build is needed).
+# REDIS_HOST comes from a ConfigMap, REDIS_PASSWORD from the Secret.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: worker-config
+  namespace: ingest
+data:
+  REDIS_HOST: redis.ingest.svc.cluster.local
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: worker-script
+  namespace: ingest
+data:
+  worker.sh: |
+    #!/bin/bash
+    # Moves a job from 'jobs' to 'processing', works on it, then removes it from 'processing'.
+    while true; do
+      job=$(redis-cli -h "$REDIS_HOST" -a "$REDIS_PASSWORD" --no-auth-warning \
+        BLMOVE jobs processing LEFT RIGHT 5)
+      [ -n "$job" ] || continue
+      sleep $((RANDOM % 4 + 2)) # simulated work: 2-5s
+      redis-cli -h "$REDIS_HOST" -a "$REDIS_PASSWORD" --no-auth-warning LREM processing 1 "$job"
+      redis-cli -h "$REDIS_HOST" -a "$REDIS_PASSWORD" --no-auth-warning INCR done
+    done
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: ingest
+  labels: { app: worker }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: worker }
+  template:
+    metadata:
+      labels: { app: worker }
+    spec:
+      containers:
+        - name: worker
+          image: redis:7
+          command: ["/bin/bash", "/scripts/worker.sh"]
+          envFrom:
+            - configMapRef: { name: worker-config }
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: redis-auth, key: password }
+          volumeMounts:
+            - name: script
+              mountPath: /scripts
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits:   { cpu: 100m, memory: 32Mi }
+      volumes:
+        - name: script
+          configMap: { name: worker-script }

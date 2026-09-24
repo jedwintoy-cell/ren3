@@ -1,0 +1,13 @@
+# Workaround for multi-node kind on a cgroup v1 host (RHEL 8) with podman.
+#
+# Problem: systemd inside each node boots in "hybrid" mode and mounts a cgroup2
+# tree at /sys/fs/cgroup/unified. On a v1 host every node container sits at the
+# same spot in that tree, so all nodes share it and their systemd instances
+# delete each other's kubelet cgroups -> worker kubelets fail with
+# "cgroup [kubelet kubepods] has some missing paths".
+#
+# Fix: force pure legacy cgroup v1 mode, so each node only uses its own
+# (properly isolated) v1 hierarchies. Inside a container systemd reads PID 1's
+# arguments as its kernel command line.
+FROM docker.io/kindest/node:v1.31.12
+ENTRYPOINT ["/usr/local/bin/entrypoint", "/sbin/init", "systemd.legacy_systemd_cgroup_controller=1"]
