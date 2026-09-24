@@ -9,5 +9,8 @@ if ! kubectl -n ingest get secret redis-auth >/dev/null 2>&1; then
   kubectl -n ingest create secret generic redis-auth \
     --from-literal=password="$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')"
 fi
-kubectl apply -f k8s/redis.yaml -f k8s/worker.yaml -f k8s/keda.yaml
+kubectl apply -f k8s/redis.yaml -f k8s/worker.yaml -f k8s/keda.yaml -f k8s/reaper.yaml
 kubectl -n ingest rollout status deploy/redis --timeout=120s
+# The worker script lives in a ConfigMap; pods only read it at start, so
+# restart them to pick up changes (no-op cost when scaled to 0).
+kubectl -n ingest rollout restart deploy/worker

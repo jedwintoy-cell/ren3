@@ -1,0 +1,18 @@
+pushed 20 jobs (run 1790264588); jobs=20
+11:43:12 SIGKILL one worker process on ren3-worker2
+t=10s jobs=10 processing=5 done=7 in_processing=[job-1790264588-1 job-1790264588-9 job-1790264588-10 job-1790264588-11 job-1790264588-12 ]
+t=21s jobs=0 processing=3 done=17 in_processing=[job-1790264588-1 job-1790264588-19 job-1790264588-20 ]
+t=31s jobs=0 processing=1 done=19 in_processing=[job-1790264588-1 ]
+t=41s jobs=0 processing=1 done=19 in_processing=[job-1790264588-1 ]
+t=51s jobs=0 processing=1 done=19 in_processing=[job-1790264588-1 ]
+t=62s jobs=0 processing=1 done=19 in_processing=[job-1790264588-1 ]
+t=72s jobs=0 processing=1 done=19 in_processing=[job-1790264588-1 ]
+t=82s jobs=0 processing=1 done=19 in_processing=[job-1790264588-1 ]
+t=92s jobs=0 processing=1 done=19 in_processing=[job-1790264588-1 ]
+t=103s jobs=0 processing=1 done=19 in_processing=[job-1790264588-1 ]
+t=113s jobs=1 processing=0 done=19 in_processing=[ ]
+t=123s jobs=0 processing=0 done=20 in_processing=[ ]
+jobs re-queued by the reaper: 1
+--- worker restarts: worker-69cb4894f6-vw4j8=0 
+jobs=0 processing=0 done=20 (expected 20)
+PASS

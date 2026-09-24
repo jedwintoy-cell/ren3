@@ -1,0 +1,7 @@
+waiting for old worker pods to go away...
+pushed 100 jobs (run 1790264083); jobs=100
+5 replicas ready, done=: scaling max 10 -> 2
+removed pods took 44s to terminate
+stuck in processing: job-1790264083-65 job-1790264083-66 job-1790264083-67 
+jobs=0 processing=3 done=97 (expected 100)
+FAIL

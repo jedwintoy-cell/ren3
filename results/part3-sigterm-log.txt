@@ -1,0 +1,3 @@
+SIGTERM: finishing current job, then exiting
+worker exited cleanly
+pod/worker-69cb4894f6-lmbhf deleted after 1s

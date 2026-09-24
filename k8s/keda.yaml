@@ -17,9 +17,11 @@ spec:
 #   0 -> 1 : KEDA's operator polls Redis every pollingInterval; when a trigger
 #            becomes active (list length > activationListLength) it scales the
 #            Deployment from 0 to 1 itself.
-#   1 -> N : KEDA creates an HPA; the HPA reads the list lengths through KEDA's
+#   1 -> N : KEDA creates an HPA; the HPA reads the list length through KEDA's
 #            metrics API server and computes replicas = ceil(length / listLength).
-#   N -> 0 : when both triggers are inactive for cooldownPeriod, KEDA sets 0.
+#   N -> 0 : when 'jobs' has been empty for cooldownPeriod, KEDA sets 0.
+#            In-flight jobs are protected by the worker's SIGTERM handling
+#            (see k8s/worker.yaml), not by the scaler.
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
@@ -39,21 +41,11 @@ spec:
           # HPA default is 300s; shortened so scale-down is visible in the demo.
           stabilizationWindowSeconds: 30
   triggers:
-    # Backlog: one worker per 5 queued jobs.
+    # One worker per 5 queued jobs.
     - type: redis
       metadata:
         address: redis.ingest.svc.cluster.local:6379
         listName: jobs
         listLength: "5"
-      authenticationRef:
-        name: redis-auth
-    # In-flight work: keep at least one replica per job being processed,
-    # so KEDA never scales to 0 while a worker is still busy.
-    # (The HPA uses the max of all triggers.)
-    - type: redis
-      metadata:
-        address: redis.ingest.svc.cluster.local:6379
-        listName: processing
-        listLength: "1"
       authenticationRef:
         name: redis-auth

@@ -18,14 +18,25 @@ data:
   worker.sh: |
     #!/bin/bash
     # Moves a job from 'jobs' to 'processing', works on it, then removes it from 'processing'.
-    while true; do
-      job=$(redis-cli -h "$REDIS_HOST" -a "$REDIS_PASSWORD" --no-auth-warning \
-        BLMOVE jobs processing LEFT RIGHT 5)
+    #
+    # Graceful shutdown: on scale-down Kubernetes sends SIGTERM to PID 1 (this
+    # script). The trap only sets a flag; bash runs it after the current
+    # command (redis-cli / sleep) finishes, so the job in hand is always
+    # completed and the loop then exits instead of taking a new one.
+    # Worst case until exit: 5s BLMOVE wait + 5s job, well within the grace period.
+    stop=0
+    trap 'stop=1; echo "SIGTERM: finishing current job, then exiting"' TERM
+
+    rcli() { redis-cli -h "$REDIS_HOST" -a "$REDIS_PASSWORD" --no-auth-warning "$@"; }
+
+    while [ "$stop" = 0 ]; do
+      job=$(rcli BLMOVE jobs processing LEFT RIGHT 5)
       [ -n "$job" ] || continue
       sleep $((RANDOM % 4 + 2)) # simulated work: 2-5s
-      redis-cli -h "$REDIS_HOST" -a "$REDIS_PASSWORD" --no-auth-warning LREM processing 1 "$job"
-      redis-cli -h "$REDIS_HOST" -a "$REDIS_PASSWORD" --no-auth-warning INCR done
+      # LREM + INCR in one transaction, so a job is never removed without being counted.
+      printf 'MULTI\nLREM processing 1 %s\nINCR done\nEXEC\n' "$job" | rcli >/dev/null
     done
+    echo "worker exited cleanly"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -42,6 +53,9 @@ spec:
     metadata:
       labels: { app: worker }
     spec:
+      # Time between SIGTERM and SIGKILL. The worker needs at most ~10s to
+      # finish (5s BLMOVE timeout + 5s job); 30s leaves headroom.
+      terminationGracePeriodSeconds: 30
       containers:
         - name: worker
           image: redis:7
