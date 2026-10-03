@@ -9,5 +9,10 @@
 # Fix: force pure legacy cgroup v1 mode, so each node only uses its own
 # (properly isolated) v1 hierarchies. Inside a container systemd reads PID 1's
 # arguments as its kernel command line.
+
+# Start from the official kind node image (contains Kubernetes 1.31.12 and its images).
 FROM docker.io/kindest/node:v1.31.12
+
+# Same start command as the original image (kind's entrypoint, then systemd = /sbin/init),
+# plus one extra argument telling systemd to use cgroup v1 only.
 ENTRYPOINT ["/usr/local/bin/entrypoint", "/sbin/init", "systemd.legacy_systemd_cgroup_controller=1"]

@@ -1,14 +1,22 @@
-# 1 control-plane + 2 workers, as required by the case.
+# kind cluster definition: 1 control-plane + 2 workers, as required by the case.
+# This is a kind config file, not a Kubernetes object: kind reads it to decide
+# how many "node" containers to start and which image each one runs.
 # The image is a thin wrapper around kindest/node:v1.31.12 that forces systemd
 # into legacy cgroup v1 mode (see cluster/Containerfile for why).
 # Build it and create the cluster with: ./cluster/create-cluster.sh
+
+# Tells kind what kind of file this is and which format version it uses.
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 
+# One entry per node; kind runs each node as a separate podman container.
 nodes:
+  # The "brain": API server, scheduler, etcd (the cluster database).
   - role: control-plane
-    image: localhost/kind-node-cgv1:v1.31.12
+    image: localhost/kind-node-cgv1:v1.31.12   # our patched node image (Kubernetes 1.31.12)
+  # Worker node 1: runs our pods (Redis, workers, KEDA, reaper).
   - role: worker
     image: localhost/kind-node-cgv1:v1.31.12
+  # Worker node 2.
   - role: worker
     image: localhost/kind-node-cgv1:v1.31.12

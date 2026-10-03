@@ -2,49 +2,66 @@
 # The password comes from Secret "redis-auth" (created by scripts/deploy.sh,
 # never committed to git). No persistence: the queue is lost if the pod dies,
 # which is acceptable for this demo (see README).
-apiVersion: apps/v1
+
+# ---------------------------------------------------------------------------
+# Deployment: "always keep 1 Redis pod running with these settings".
+# If the pod dies, the Deployment creates a replacement automatically.
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1                # Deployments live in the "apps" API group
 kind: Deployment
 metadata:
-  name: redis
-  namespace: ingest
-  labels: { app: redis }
+  name: redis                      # name of the Deployment
+  namespace: ingest                # which namespace ("folder") it goes in
+  labels: { app: redis }           # a tag on the Deployment itself
 spec:
-  replicas: 1
+  replicas: 1                      # exactly one Redis pod
   selector:
-    matchLabels: { app: redis }
-  template:
+    matchLabels: { app: redis }    # "the pods I manage are those labelled app=redis"
+  template:                        # the blueprint for every pod this Deployment creates
     metadata:
-      labels: { app: redis }
+      labels: { app: redis }       # give each pod that label (must match the selector above)
     spec:
-      containers:
+      containers:                  # the containers inside the pod (just one here)
         - name: redis
-          image: redis:7
-          # $(REDIS_PASSWORD) is expanded by Kubernetes from the env var below.
+          image: redis:7           # official Redis image, version 7 (also contains redis-cli and bash)
+          # The command-line arguments Redis is started with:
+          #   --requirepass X     -> clients must log in with password X
+          #   $(REDIS_PASSWORD)   -> Kubernetes (not bash) replaces this with the env var defined below
+          #   --save ""           -> never write snapshots to disk
+          #   --appendonly no     -> no append-only log either (so: no persistence at all)
           args: ["redis-server", "--requirepass", "$(REDIS_PASSWORD)", "--save", "", "--appendonly", "no"]
-          env:
+          env:                                  # environment variables inside the container
             - name: REDIS_PASSWORD
               valueFrom:
-                secretKeyRef: { name: redis-auth, key: password }
+                secretKeyRef: { name: redis-auth, key: password }   # value = key "password" of Secret "redis-auth"
           ports:
-            - containerPort: 6379
-              name: redis
+            - containerPort: 6379  # the port Redis listens on (Redis' standard port)
+              name: redis          # a name for the port, used by the Service below
+          # Readiness probe: Kubernetes runs this command every 5 s inside the container.
+          # It logs in with the password and sends PING; success = the reply contains PONG.
+          # Until it succeeds the pod is "not Ready" and the Service sends it no traffic.
           readinessProbe:
             exec:
               command: ["sh", "-c", "redis-cli -a \"$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
-            initialDelaySeconds: 2
-            periodSeconds: 5
+            initialDelaySeconds: 2   # wait 2 s after start before the first check
+            periodSeconds: 5         # then check every 5 s
           resources:
-            requests: { cpu: 50m, memory: 64Mi }
-            limits:   { cpu: 250m, memory: 128Mi }
+            requests: { cpu: 50m, memory: 64Mi }    # guaranteed share; the scheduler uses it to pick a node (50m = 0.05 CPU)
+            limits:   { cpu: 250m, memory: 128Mi }  # hard maximum; going over the memory limit gets the container killed (OOM)
 ---
+# ---------------------------------------------------------------------------
+# Service: a stable name + virtual IP in front of the Redis pod.
+# Pods get a new IP every time they are recreated; the Service name
+# redis.ingest.svc.cluster.local never changes.
+# ---------------------------------------------------------------------------
 apiVersion: v1
 kind: Service
 metadata:
-  name: redis
+  name: redis                      # DNS name: redis.ingest.svc.cluster.local
   namespace: ingest
 spec:
-  selector: { app: redis }
+  selector: { app: redis }         # forward traffic to pods labelled app=redis (that are Ready)
   ports:
     - name: redis
-      port: 6379
-      targetPort: redis
+      port: 6379                   # the port clients connect to on the Service
+      targetPort: redis            # forwarded to the container port named "redis" (6379)

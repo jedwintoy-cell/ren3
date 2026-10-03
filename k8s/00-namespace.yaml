@@ -1,4 +1,7 @@
-apiVersion: v1
-kind: Namespace
+# A Namespace is a "folder" for Kubernetes objects.
+# Everything belonging to this project (Redis, workers, KEDA objects, reaper)
+# lives in "ingest", so it's grouped together and can be deleted together.
+apiVersion: v1              # core Kubernetes API, version 1
+kind: Namespace             # the type of object
 metadata:
-  name: ingest
+  name: ingest              # its name; other files use "namespace: ingest"

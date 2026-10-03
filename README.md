@@ -262,3 +262,20 @@ immediately.
 `systemd.legacy_systemd_cgroup_controller=1` to `/sbin/init`. That forces pure cgroup v1 mode,
 where each node's hierarchies are isolated. The alternative, switching the host to cgroup v2,
 needs a kernel parameter change and a reboot.
+
+## DNS note (offline / air-gapped hosts)
+
+When this host lost its outside network, every `redis-cli` call from a pod took about **12–14 s**:
+jobs crawled, the reaper hit its 50 s deadline, and graceful shutdown took 46 s again.
+
+**Cause:** Kubernetes gives pods `options ndots:5`, so a name with fewer than 5 dots, like
+`redis.ingest.svc.cluster.local`, is first tried with every *search suffix*. The search list
+includes suffixes inherited from the host (`dns.podman`, `mshome.net`, `local`). CoreDNS forwards
+those to the host's upstream DNS, which is unreachable, so each attempt waits for a timeout.
+Measured in a worker pod: lookup without a trailing dot **14 018 ms**, with a trailing dot **1 ms**.
+
+**Fix:** `REDIS_HOST: redis.ingest.svc.cluster.local.` (in `k8s/worker.yaml`). The trailing dot
+makes it an absolute name, so the search list is skipped. KEDA's Go resolver showed no timeouts,
+so its `address` is unchanged. Alternatives: `dnsConfig: {options: [{name: ndots, value: "2"}]}`
+on the pods, or fixing CoreDNS's upstream. After the fix, `scaledown-test.sh 100 5` and
+`crash-test.sh 20` both pass again.

@@ -7,6 +7,11 @@
 # in 'processing' on the previous run, i.e. >= 1 minute ago. A job takes at
 # most 5s, so a healthy worker never holds one that long. The previous run's
 # snapshot is kept in the Redis set 'reaper:seen'.
+# This file contains two objects: the script (ConfigMap) and the schedule (CronJob).
+
+# ---------------------------------------------------------------------------
+# 1) ConfigMap holding the reaper script, mounted as /scripts/reaper.sh.
+# ---------------------------------------------------------------------------
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -15,62 +20,80 @@ metadata:
 data:
   reaper.sh: |
     #!/bin/bash
+    # Same Redis helper as the worker: host + password from env vars, "$@" = the command.
     rcli() { redis-cli -h "$REDIS_HOST" -a "$REDIS_PASSWORD" --no-auth-warning "$@"; }
 
     # Atomic: only re-queue if the job is still in 'processing'; if a worker
     # finished it meanwhile, LREM returns 0 and nothing happens.
+    # This is a small Lua program that Redis runs as one indivisible step:
+    #   KEYS[1] = processing, KEYS[2] = jobs, ARGV[1] = the job ID.
+    #   LREM removes 1 copy of the job from processing; if that worked (== 1),
+    #   LPUSH puts it at the FRONT of jobs so it is picked up next; returns 1 or 0.
     REQUEUE="if redis.call('LREM', KEYS[1], 1, ARGV[1]) == 1 then
                redis.call('LPUSH', KEYS[2], ARGV[1]) return 1 end
              return 0"
 
+    # Counter for this run's log line.
     requeued=0
+    # Loop over every job ID that was in 'processing' at the PREVIOUS run (one minute ago).
     for job in $(rcli SMEMBERS reaper:seen); do
+      # Run the Lua script: 2 = number of keys (processing, jobs), then the job ID.
+      # It prints 1 if the job was still stuck and has been re-queued.
       if [ "$(rcli EVAL "$REQUEUE" 2 processing jobs "$job")" = 1 ]; then
         echo "re-queued stuck job $job"
-        rcli INCR requeued >/dev/null    # total, for observability
+        # Running total in Redis (key "requeued"), for observability.
+        rcli INCR requeued >/dev/null
         requeued=$((requeued + 1))
       fi
     done
 
     # Remember what is in flight now; the next run re-queues whatever is still there.
+    # Forget the old snapshot...
     rcli DEL reaper:seen >/dev/null
+    # ...read every job currently in 'processing' (0 -1 = from first to last)...
     current=$(rcli LRANGE processing 0 -1)
+    # ...and, if there are any, store them in the set 'reaper:seen' for next minute.
+    # ($current is deliberately unquoted so each job ID becomes a separate argument.)
     [ -n "$current" ] && rcli SADD reaper:seen $current >/dev/null
+    # One summary line per run, visible with kubectl logs.
     echo "re-queued=$requeued, watching $(rcli SCARD reaper:seen) in-flight job(s)"
 ---
+# ---------------------------------------------------------------------------
+# 2) CronJob: Kubernetes creates a Job (which runs one pod) on a schedule.
+# ---------------------------------------------------------------------------
 apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: reaper
   namespace: ingest
 spec:
-  schedule: "* * * * *"          # every minute (cron's smallest interval)
-  concurrencyPolicy: Forbid      # never two reapers at once
-  successfulJobsHistoryLimit: 1
-  failedJobsHistoryLimit: 1
-  jobTemplate:
+  schedule: "* * * * *"          # every minute (cron's smallest interval); fields: min hour day month weekday
+  concurrencyPolicy: Forbid      # never two reapers at once (skip a run if the last is still going)
+  successfulJobsHistoryLimit: 1  # keep only the last successful run (so its logs can be read)
+  failedJobsHistoryLimit: 1      # keep only the last failed run
+  jobTemplate:                   # blueprint for each Job the CronJob creates
     spec:
-      backoffLimit: 0
-      activeDeadlineSeconds: 50
-      template:
+      backoffLimit: 0            # if a run fails, don't retry it; the next minute's run will try again
+      activeDeadlineSeconds: 50  # kill a run that takes longer than 50 s (before the next one is due)
+      template:                  # blueprint for the Job's pod
         spec:
-          restartPolicy: Never
+          restartPolicy: Never   # a finished/failed reaper pod is not restarted
           containers:
             - name: reaper
-              image: redis:7
-              command: ["/bin/bash", "/scripts/reaper.sh"]
+              image: redis:7                                 # same image as the worker: bash + redis-cli
+              command: ["/bin/bash", "/scripts/reaper.sh"]   # run the script from the ConfigMap above
               envFrom:
-                - configMapRef: { name: worker-config }
+                - configMapRef: { name: worker-config }      # REDIS_HOST, shared with the worker
               env:
-                - name: REDIS_PASSWORD
+                - name: REDIS_PASSWORD                       # password from the shared Secret
                   valueFrom:
                     secretKeyRef: { name: redis-auth, key: password }
               volumeMounts:
                 - name: script
-                  mountPath: /scripts
+                  mountPath: /scripts                        # -> /scripts/reaper.sh
               resources:
-                requests: { cpu: 10m, memory: 16Mi }
+                requests: { cpu: 10m, memory: 16Mi }         # tiny: it runs for about a second
                 limits:   { cpu: 100m, memory: 32Mi }
           volumes:
             - name: script
-              configMap: { name: reaper-script }
+              configMap: { name: reaper-script }             # volume content = the reaper-script ConfigMap

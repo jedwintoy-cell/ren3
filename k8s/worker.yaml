@@ -1,20 +1,37 @@
-# Worker: the bash stub from the case, run in the stock redis:7 image
-# (it already contains bash + redis-cli, so no image build is needed).
-# REDIS_HOST comes from a ConfigMap, REDIS_PASSWORD from the Secret.
+# Worker: the bash stub from the case (with the graceful-shutdown fix), run in
+# the stock redis:7 image (it already contains bash + redis-cli, so no image
+# build is needed). REDIS_HOST comes from a ConfigMap, REDIS_PASSWORD from the Secret.
+# This file contains three objects, separated by "---".
+
+# ---------------------------------------------------------------------------
+# 1) ConfigMap with plain (non-secret) settings for the worker and the reaper.
+# ---------------------------------------------------------------------------
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: worker-config
   namespace: ingest
 data:
-  REDIS_HOST: redis.ingest.svc.cluster.local
+  # The Redis Service's DNS name (<service>.<namespace>.svc.cluster.local).
+  # The trailing "." makes it an absolute name, so the resolver skips the pod's
+  # search list. Without it (Kubernetes sets ndots:5), each lookup first tries
+  # suffixes inherited from the host (e.g. dns.podman, mshome.net); with no
+  # upstream DNS (air-gapped / offline host) those time out and every redis-cli
+  # call took ~12-14 s instead of ~2 ms.
+  REDIS_HOST: redis.ingest.svc.cluster.local.
 ---
+# ---------------------------------------------------------------------------
+# 2) ConfigMap holding the worker script itself. The Deployment below mounts
+#    it as the file /scripts/worker.sh. Changing the script only needs
+#    "kubectl apply" + a pod restart (scripts/deploy.sh does both).
+# ---------------------------------------------------------------------------
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: worker-script
   namespace: ingest
 data:
+  # "|" means: the following indented lines are one block of text (the script file).
   worker.sh: |
     #!/bin/bash
     # Moves a job from 'jobs' to 'processing', works on it, then removes it from 'processing'.
@@ -24,32 +41,53 @@ data:
     # command (redis-cli / sleep) finishes, so the job in hand is always
     # completed and the loop then exits instead of taking a new one.
     # Worst case until exit: 5s BLMOVE wait + 5s job, well within the grace period.
+
+    # Flag: 0 = keep working, 1 = Kubernetes asked us to stop.
     stop=0
+
+    # When SIGTERM ("please stop") arrives, don't die: set the flag and log it.
+    # Without this trap, bash as PID 1 would simply ignore SIGTERM.
     trap 'stop=1; echo "SIGTERM: finishing current job, then exiting"' TERM
 
+    # Helper function so every Redis call uses the same connection settings:
+    #   -h host, -a password, --no-auth-warning hides the "password on command line" warning,
+    #   "$@" = the Redis command passed to rcli (e.g. rcli GET done).
     rcli() { redis-cli -h "$REDIS_HOST" -a "$REDIS_PASSWORD" --no-auth-warning "$@"; }
 
+    # Main loop: runs until the stop flag is set.
     while [ "$stop" = 0 ]; do
+      # Take the oldest job: atomically move it from the left of 'jobs' to the right of
+      # 'processing'. Waits up to 5 s if the queue is empty (the timeout also bounds
+      # how long shutdown can be delayed). The job ID is captured into $job.
       job=$(rcli BLMOVE jobs processing LEFT RIGHT 5)
+      # Nothing came within 5 s (empty result)? Go back to the top of the loop.
       [ -n "$job" ] || continue
-      sleep $((RANDOM % 4 + 2)) # simulated work: 2-5s
-      # LREM + INCR in one transaction, so a job is never removed without being counted.
+      # Simulated work: sleep a random 2-5 seconds ($RANDOM % 4 is 0..3, +2 gives 2..5).
+      sleep $((RANDOM % 4 + 2))
+      # Finish the job: send 4 commands to Redis in one go. MULTI...EXEC is a transaction,
+      # so "remove from processing" (LREM) and "count as done" (INCR) happen together.
+      # %s is replaced by the job ID; the output is thrown away (>/dev/null).
       printf 'MULTI\nLREM processing 1 %s\nINCR done\nEXEC\n' "$job" | rcli >/dev/null
     done
+
+    # Only reached after SIGTERM: the loop ended cleanly, the container exits with success.
     echo "worker exited cleanly"
 ---
+# ---------------------------------------------------------------------------
+# 3) Deployment: runs the worker pods. KEDA changes how many (0..10).
+# ---------------------------------------------------------------------------
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: worker
+  name: worker                     # KEDA's ScaledObject points at this name
   namespace: ingest
   labels: { app: worker }
 spec:
   # No "replicas" here: KEDA owns the replica count (see k8s/keda.yaml).
   # Re-applying this file therefore won't reset a scaled worker back to 1.
   selector:
-    matchLabels: { app: worker }
-  template:
+    matchLabels: { app: worker }   # manages pods labelled app=worker
+  template:                        # blueprint for every worker pod
     metadata:
       labels: { app: worker }
     spec:
@@ -58,20 +96,20 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: worker
-          image: redis:7
-          command: ["/bin/bash", "/scripts/worker.sh"]
+          image: redis:7                                # reuse the Redis image: it has bash + redis-cli
+          command: ["/bin/bash", "/scripts/worker.sh"]  # run our script (it becomes PID 1 in the container)
           envFrom:
-            - configMapRef: { name: worker-config }
+            - configMapRef: { name: worker-config }     # every key in worker-config becomes an env var (REDIS_HOST)
           env:
-            - name: REDIS_PASSWORD
+            - name: REDIS_PASSWORD                      # the password, read from the Secret
               valueFrom:
                 secretKeyRef: { name: redis-auth, key: password }
           volumeMounts:
-            - name: script
-              mountPath: /scripts
+            - name: script                              # mount the volume named "script" (defined below)...
+              mountPath: /scripts                       # ...as the folder /scripts -> /scripts/worker.sh
           resources:
-            requests: { cpu: 10m, memory: 16Mi }
-            limits:   { cpu: 100m, memory: 32Mi }
+            requests: { cpu: 10m, memory: 16Mi }        # tiny guaranteed share, so 10 workers fit on this small host
+            limits:   { cpu: 100m, memory: 32Mi }       # hard maximum per worker
       volumes:
         - name: script
-          configMap: { name: worker-script }
+          configMap: { name: worker-script }            # the volume's content = the worker-script ConfigMap

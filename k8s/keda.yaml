@@ -1,19 +1,25 @@
-# KEDA autoscaling for the worker Deployment.
-#
-# TriggerAuthentication: KEDA reads the Redis password from the same Secret
-# the worker uses, so the password never appears in the ScaledObject.
-apiVersion: keda.sh/v1alpha1
+# KEDA autoscaling for the worker Deployment. Two objects:
+#   1) TriggerAuthentication: where KEDA finds the Redis password
+#   2) ScaledObject: what to scale, on which metric, between which limits
+# (These "kinds" only exist because KEDA installed its own object types, called CRDs.)
+
+# ---------------------------------------------------------------------------
+# 1) TriggerAuthentication: KEDA reads the Redis password from the same Secret
+#    the worker uses, so the password never appears in the ScaledObject.
+# ---------------------------------------------------------------------------
+apiVersion: keda.sh/v1alpha1       # KEDA's own API group
 kind: TriggerAuthentication
 metadata:
-  name: redis-auth
+  name: redis-auth                 # referenced below by authenticationRef
   namespace: ingest
 spec:
-  secretTargetRef:
-    - parameter: password
-      name: redis-auth
-      key: password
+  secretTargetRef:                 # take trigger settings from a Kubernetes Secret
+    - parameter: password          # fill the Redis scaler's "password" setting...
+      name: redis-auth             # ...from the Secret called redis-auth...
+      key: password                # ...using its key "password"
 ---
-# ScaledObject: 0..10 workers.
+# ---------------------------------------------------------------------------
+# 2) ScaledObject: 0..10 workers.
 #   0 -> 1 : KEDA's operator polls Redis every pollingInterval; when a trigger
 #            becomes active (list length > activationListLength) it scales the
 #            Deployment from 0 to 1 itself.
@@ -22,30 +28,32 @@ spec:
 #   N -> 0 : when 'jobs' has been empty for cooldownPeriod, KEDA sets 0.
 #            In-flight jobs are protected by the worker's SIGTERM handling
 #            (see k8s/worker.yaml), not by the scaler.
+# ---------------------------------------------------------------------------
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
-  name: worker
+  name: worker                     # KEDA names the HPA it creates "keda-hpa-worker"
   namespace: ingest
 spec:
   scaleTargetRef:
-    name: worker
-  minReplicaCount: 0
-  maxReplicaCount: 10
-  pollingInterval: 5     # seconds between KEDA checks of Redis
-  cooldownPeriod: 30     # seconds idle before scaling 1 -> 0
+    name: worker                   # the Deployment to scale (k8s/worker.yaml)
+  minReplicaCount: 0               # allowed to scale all the way to zero (no work = no pods)
+  maxReplicaCount: 10              # never more than 10 workers
+  pollingInterval: 5               # seconds between KEDA checks of Redis
+  cooldownPeriod: 30               # seconds the queue must stay empty before scaling 1 -> 0
   advanced:
-    horizontalPodAutoscalerConfig:
+    horizontalPodAutoscalerConfig: # extra settings passed to the HPA that KEDA creates
       behavior:
         scaleDown:
           # HPA default is 300s; shortened so scale-down is visible in the demo.
+          # (The HPA uses the highest recommendation of the last 30 s, to avoid flapping.)
           stabilizationWindowSeconds: 30
-  triggers:
+  triggers:                        # the metric(s) to scale on
     # One worker per 5 queued jobs.
-    - type: redis
+    - type: redis                  # use KEDA's built-in Redis list scaler
       metadata:
-        address: redis.ingest.svc.cluster.local:6379
-        listName: jobs
-        listLength: "5"
+        address: redis.ingest.svc.cluster.local:6379   # where Redis is (Service DNS name + port)
+        listName: jobs             # measure LLEN jobs (number of waiting jobs)
+        listLength: "5"            # target 5 waiting jobs per worker -> replicas = ceil(LLEN / 5)
       authenticationRef:
-        name: redis-auth
+        name: redis-auth           # get the password via the TriggerAuthentication above
